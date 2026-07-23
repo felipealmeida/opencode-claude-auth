@@ -806,6 +806,187 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       }
     }
   })
+
+  describe("ANTHROPIC_BASE_URL upstream override", () => {
+    it("getUpstreamOrigin returns null when ANTHROPIC_BASE_URL is unset; returns origin when set to valid URL; returns null for invalid values", () => {
+      delete process.env.ANTHROPIC_BASE_URL
+      assert.equal(helpers.getUpstreamOrigin(), null)
+
+      process.env.ANTHROPIC_BASE_URL = "http://localhost:3456"
+      try {
+        assert.equal(helpers.getUpstreamOrigin(), "http://localhost:3456")
+      } finally {
+        delete process.env.ANTHROPIC_BASE_URL
+      }
+
+      process.env.ANTHROPIC_BASE_URL = "not a url"
+      try {
+        assert.equal(helpers.getUpstreamOrigin(), null)
+      } finally {
+        delete process.env.ANTHROPIC_BASE_URL
+      }
+
+      process.env.ANTHROPIC_BASE_URL = "ftp://x"
+      try {
+        assert.equal(helpers.getUpstreamOrigin(), null)
+      } finally {
+        delete process.env.ANTHROPIC_BASE_URL
+      }
+    })
+
+    it("buildRequestUrl applies override when set", async () => {
+      process.env.ANTHROPIC_BASE_URL = "http://localhost:3456"
+      try {
+        const originalNow = Date.now
+        const originalSetInterval = globalThis.setInterval
+        const originalHome = process.env.HOME
+        const originalFetch = globalThis.fetch
+        const tempHome = await mkdtemp(
+          join(tmpdir(), "opencode-claude-auth-home-"),
+        )
+        process.env.HOME = tempHome
+        Date.now = () => 1_700_000_000_000
+        globalThis.setInterval = (() => ({
+          unref() {},
+        })) as unknown as typeof setInterval
+
+        let forwardedInput: RequestInfo | URL | undefined
+
+        try {
+          const { helpersModule } = await loadHelpersWithCountingKeychain(
+            Date.now() + 10 * 60_000,
+          )
+          globalThis.fetch = (async (input: RequestInfo | URL) => {
+            forwardedInput = input
+            return new Response("ok")
+          }) as typeof fetch
+
+          const plugin = await helpersModule.default({} as never)
+          const typedPlugin = plugin as { auth?: { loader?: TestAuthLoader } }
+          assert.equal(typeof typedPlugin.auth?.loader, "function")
+          const authConfig = await typedPlugin.auth!.loader!(
+            async () => ({
+              type: "oauth",
+              refresh: "refresh",
+              access: "access",
+              expires: Date.now() + 60_000,
+            }),
+            { models: {} },
+          )
+
+          await authConfig.fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            body: JSON.stringify({ model: "claude-haiku-4-5", messages: [] }),
+          })
+
+          assert.equal(
+            forwardedInput,
+            "http://localhost:3456/v1/messages?beta=true",
+          )
+        } finally {
+          Date.now = originalNow
+          globalThis.setInterval = originalSetInterval
+          globalThis.fetch = originalFetch
+          if (typeof originalHome === "string") {
+            process.env.HOME = originalHome
+          } else {
+            delete process.env.HOME
+          }
+        }
+      } finally {
+        delete process.env.ANTHROPIC_BASE_URL
+      }
+    })
+
+    it("buildRequestUrl leaves non-anthropic URLs unchanged even with override set", async () => {
+      process.env.ANTHROPIC_BASE_URL = "http://localhost:3456"
+      try {
+        const originalNow = Date.now
+        const originalSetInterval = globalThis.setInterval
+        const originalHome = process.env.HOME
+        const originalFetch = globalThis.fetch
+        const tempHome = await mkdtemp(
+          join(tmpdir(), "opencode-claude-auth-home-"),
+        )
+        process.env.HOME = tempHome
+        Date.now = () => 1_700_000_000_000
+        globalThis.setInterval = (() => ({
+          unref() {},
+        })) as unknown as typeof setInterval
+
+        let forwardedInput: RequestInfo | URL | undefined
+
+        try {
+          const { helpersModule } = await loadHelpersWithCountingKeychain(
+            Date.now() + 10 * 60_000,
+          )
+          globalThis.fetch = (async (input: RequestInfo | URL) => {
+            forwardedInput = input
+            return new Response("ok")
+          }) as typeof fetch
+
+          const plugin = await helpersModule.default({} as never)
+          const typedPlugin = plugin as { auth?: { loader?: TestAuthLoader } }
+          assert.equal(typeof typedPlugin.auth?.loader, "function")
+          const authConfig = await typedPlugin.auth!.loader!(
+            async () => ({
+              type: "oauth",
+              refresh: "refresh",
+              access: "access",
+              expires: Date.now() + 60_000,
+            }),
+            { models: {} },
+          )
+
+          await authConfig.fetch("https://example.com/v1/messages", {
+            method: "POST",
+            body: JSON.stringify({ model: "claude-haiku-4-5", messages: [] }),
+          })
+
+          const u = new URL(forwardedInput as string)
+          assert.equal(u.origin, "https://example.com")
+          assert.ok(u.searchParams.has("beta"))
+        } finally {
+          Date.now = originalNow
+          globalThis.setInterval = originalSetInterval
+          globalThis.fetch = originalFetch
+          if (typeof originalHome === "string") {
+            process.env.HOME = originalHome
+          } else {
+            delete process.env.HOME
+          }
+        }
+      } finally {
+        delete process.env.ANTHROPIC_BASE_URL
+      }
+    })
+
+    it("auth.loader returns baseURL === 'http://localhost:3456/v1' when override is set", async () => {
+      process.env.ANTHROPIC_BASE_URL = "http://localhost:3456"
+      try {
+        const { helpersModule } = await loadHelpersWithCountingKeychain(
+          Date.now() + 10 * 60_000,
+        )
+
+        const plugin = await helpersModule.default({} as never)
+        const typedPlugin = plugin as { auth?: { loader?: TestAuthLoader } }
+        assert.equal(typeof typedPlugin.auth?.loader, "function")
+        const authConfig = await typedPlugin.auth!.loader!(
+          async () => ({
+            type: "oauth",
+            refresh: "refresh",
+            access: "access",
+            expires: Date.now() + 60_000,
+          }),
+          { models: {} },
+        )
+
+        assert.equal(authConfig.baseURL, "http://localhost:3456/v1")
+      } finally {
+        delete process.env.ANTHROPIC_BASE_URL
+      }
+    })
+  })
 })
 
 describe("auth hook — account resolution", () => {

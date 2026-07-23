@@ -65,6 +65,20 @@ function getUserAgent(): string {
   )
 }
 
+// Optional upstream override (ANTHROPIC_BASE_URL) — e.g. a local teamclaude proxy.
+export function getUpstreamOrigin(): string | null {
+  const raw = process.env.ANTHROPIC_BASE_URL
+  if (!raw) return null
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    return null
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null
+  return url.origin
+}
+
 function getStainlessHeaders(): Record<string, string> {
   return {
     "x-stainless-arch": process.arch === "arm64" ? "arm64" : process.arch,
@@ -87,7 +101,13 @@ function buildRequestUrl(input: RequestInfo | URL): string | URL {
         ? input.toString()
         : input.url
 
-  const url = new URL(raw)
+  const parsed = new URL(raw)
+  const upstreamOrigin = getUpstreamOrigin()
+  const url =
+    upstreamOrigin && parsed.hostname === "api.anthropic.com"
+      ? new URL(parsed.pathname + parsed.search, upstreamOrigin)
+      : parsed
+
   if (url.pathname === "/v1/messages" && !url.searchParams.has("beta")) {
     url.searchParams.set("beta", "true")
   }
@@ -313,9 +333,13 @@ const plugin: Plugin = async () => {
           modelCount: Object.keys(provider.models).length,
         })
 
+        const upstreamOrigin = getUpstreamOrigin()
+        const baseURL = upstreamOrigin
+          ? `${upstreamOrigin}/v1`
+          : "https://api.anthropic.com/v1"
         return {
           apiKey: "",
-          baseURL: "https://api.anthropic.com/v1",
+          baseURL,
           async fetch(input: RequestInfo | URL, init?: RequestInit) {
             const latest = getCachedCredentials()
             if (!latest) {
