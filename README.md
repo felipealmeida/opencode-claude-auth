@@ -150,19 +150,32 @@ This reads your stored credentials, calls Anthropic's OAuth token endpoint, and 
 
 All configurable parameters can be overridden via environment variables. If Anthropic changes something before we publish an update, set an env var and keep working:
 
-| Variable                            | Description                                                                                                                                                                            | Default                                                                                                 |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `ANTHROPIC_CLI_VERSION`             | Claude CLI version for user-agent and billing headers                                                                                                                                  | `2.1.80`                                                                                                |
-| `ANTHROPIC_USER_AGENT`              | Full User-Agent string (overrides CLI version)                                                                                                                                         | `claude-cli/{version} (external, cli)`                                                                  |
-| `ANTHROPIC_BETA_FLAGS`              | Comma-separated beta feature flags                                                                                                                                                     | `claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05` |
-| `CLAUDE_AUTH_DEBUG`                 | Enable diagnostic logging (`1` for default path, or a custom file path)                                                                                                                | disabled                                                                                                |
-| `OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS` | Max ms the plugin waits when honouring a 429/529 `retry-after` header. Beyond this cap the response surfaces immediately so OpenCode doesn't appear to hang on hour-long quota resets. | `30000`                                                                                                 |
+| Variable                            | Description                                                                                                                                                                                                                         | Default                                                                                                 |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_CLI_VERSION`             | Claude CLI version for user-agent and billing headers                                                                                                                                                                               | `2.1.80`                                                                                                |
+| `ANTHROPIC_USER_AGENT`              | Full User-Agent string (overrides CLI version)                                                                                                                                                                                      | `claude-cli/{version} (external, cli)`                                                                  |
+| `ANTHROPIC_BETA_FLAGS`              | Comma-separated beta feature flags                                                                                                                                                                                                  | `claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05` |
+| `CLAUDE_AUTH_DEBUG`                 | Enable diagnostic logging (`1` for default path, or a custom file path)                                                                                                                                                             | disabled                                                                                                |
+| `OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS` | Max ms the plugin waits when honouring a 429/529 `retry-after` header. Beyond this cap the response surfaces immediately so OpenCode doesn't appear to hang on hour-long quota resets.                                              | `30000`                                                                                                 |
+| `ANTHROPIC_BASE_URL`                | Route all Anthropic requests through this origin instead of `api.anthropic.com` — e.g. a local teamclaude proxy for multi-account rotation. Only requests to `api.anthropic.com` are rewritten; other hosts pass through untouched. | `https://api.anthropic.com`                                                                             |
 
 Example:
 
 ```bash
 export ANTHROPIC_CLI_VERSION=2.2.0
 ```
+
+## Routing through a local proxy (teamclaude)
+
+You can route the plugin through a local [teamclaude](https://github.com/D1DX/teamclaude) proxy to spread traffic across multiple Claude accounts with automatic quota-based rotation. Point the plugin at the proxy by setting `ANTHROPIC_BASE_URL` to the proxy origin:
+
+```bash
+eval $(teamclaude env)          # exports ANTHROPIC_BASE_URL=http://localhost:<port>
+# or set it manually:
+export ANTHROPIC_BASE_URL=http://localhost:3456
+```
+
+Then run OpenCode as usual. The plugin keeps sending the Claude Code identity headers and your `Authorization: Bearer` token exactly as it does when talking to Anthropic directly; teamclaude accepts the request on localhost, binds the session to one of its pooled accounts, and handles account rotation, quota pacing, and token refresh upstream. When `ANTHROPIC_BASE_URL` is unset, the plugin talks to `api.anthropic.com` directly with no change in behavior.
 
 ## How it works (technical)
 
