@@ -342,12 +342,17 @@ const plugin: Plugin = async () => {
           baseURL,
           async fetch(input: RequestInfo | URL, init?: RequestInit) {
             const latest = getCachedCredentials()
-            if (!latest) {
+            if (!latest && !upstreamOrigin) {
               log("fetch_no_credentials", { modelId: "unknown" })
               throw new Error(
                 "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
               )
             }
+            // Proxy mode (ANTHROPIC_BASE_URL, e.g. a local teamclaude proxy):
+            // the upstream authenticates and refreshes on our behalf, so a valid
+            // local credential is not required. Send an empty Bearer and let the
+            // proxy inject the real pooled-account token.
+            const accessToken = latest?.accessToken ?? ""
 
             const requestInit = init ?? {}
             const bodyStr =
@@ -364,8 +369,8 @@ const plugin: Plugin = async () => {
 
             log("fetch_credentials", {
               modelId,
-              accessToken: latest.accessToken,
-              expiresAt: latest.expiresAt,
+              accessToken,
+              expiresAt: latest?.expiresAt ?? null,
             })
 
             // Get excluded betas for this model (from previous failed requests)
@@ -374,7 +379,7 @@ const plugin: Plugin = async () => {
             const headers = buildRequestHeaders(
               input,
               requestInit,
-              latest.accessToken,
+              accessToken,
               modelId,
               excluded,
             )
@@ -404,7 +409,7 @@ const plugin: Plugin = async () => {
             if (response.status === 401) {
               log("fetch_401_retry", { modelId })
               const refreshed = getCachedCredentials()
-              if (refreshed && refreshed.accessToken !== latest.accessToken) {
+              if (refreshed && refreshed.accessToken !== accessToken) {
                 const retryHeaders = buildRequestHeaders(
                   input,
                   requestInit,
@@ -455,7 +460,7 @@ const plugin: Plugin = async () => {
 
               // Rebuild headers without the excluded beta and retry
               const currentCreds = getCachedCredentials()
-              const retryToken = currentCreds?.accessToken ?? latest.accessToken
+              const retryToken = currentCreds?.accessToken ?? accessToken
               const newExcluded = getExcludedBetas(modelId)
               const newHeaders = buildRequestHeaders(
                 input,
