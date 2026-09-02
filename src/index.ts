@@ -334,16 +334,18 @@ const plugin: Plugin = async () => {
           async fetch(input: RequestInfo | URL, init?: RequestInit) {
             const requestInit = init ?? {}
             let latest = await getCachedCredentials()
-            if (!latest) {
+            if (!latest && !upstreamOrigin) {
               // A transient refresh rate-limit must not surface as a hard error.
               // Wait (bounded, abort-aware) for our cooldown to clear or for a
               // sibling OpenCode instance / the claude CLI to write a fresh
-              // token to the shared store.
+              // token to the shared store. Only bother waiting when we actually
+              // need a local credential: in proxy mode the upstream (teamclaude)
+              // authenticates for us, so a null local credential is expected.
               latest = await getCredentialsWithBackoff({
                 signal: requestInit.signal ?? undefined,
               })
             }
-            if (!latest) {
+            if (!latest && !upstreamOrigin) {
               if (getActiveRefreshFailureKind() === "transient") {
                 // Retryable: let OpenCode/the AI SDK back off and retry rather
                 // than telling the user to re-authenticate for a passing
@@ -374,6 +376,11 @@ const plugin: Plugin = async () => {
                 "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
               )
             }
+            // Proxy mode (ANTHROPIC_BASE_URL, e.g. a local teamclaude proxy):
+            // the upstream authenticates and refreshes on our behalf, so a valid
+            // local credential is not required. Send an empty Bearer and let the
+            // proxy inject the real pooled-account token.
+            const accessToken = latest?.accessToken ?? ""
 
             const bodyStr =
               typeof requestInit.body === "string"
@@ -389,8 +396,8 @@ const plugin: Plugin = async () => {
 
             log("fetch_credentials", {
               modelId,
-              accessToken: latest.accessToken,
-              expiresAt: latest.expiresAt,
+              accessToken,
+              expiresAt: latest?.expiresAt ?? null,
             })
 
             // Get excluded betas for this model (from previous failed requests)
@@ -399,7 +406,7 @@ const plugin: Plugin = async () => {
             const headers = buildRequestHeaders(
               input,
               requestInit,
-              latest.accessToken,
+              accessToken,
               modelId,
               excluded,
             )
@@ -426,95 +433,102 @@ const plugin: Plugin = async () => {
               retryAttempt: 0,
             })
 
-            // Recover from a rejected token: first by adopting credentials
-            // rotated externally (cswap switching accounts, the claude CLI,
-            // another OpenCode instance), then by forcing an OAuth refresh
-            // when the store still holds the token that was just rejected.
-            //
-            // Most cases resolve on the first attempt: a cold or unreadable
-            // store yields null from the reload (reloadCredentialsFromSource
-            // rejects anything expiring within 60s), so the force refresh runs
-            // immediately. The second attempt covers the narrower race where
-            // the reload returns a valid-looking token that a concurrent
-            // writer has itself just rotated again.
-            //
-            // The cap is the real bound. Against a store being rotated on
-            // every read, every candidate differs from tokenInUse, so the
-            // no-progress break never fires and the cap alone stops the loop.
-            // The break is the fast path out of the common cases, not the
-            // guarantee of termination.
-            //
-            // tokenInUse deliberately tracks only the last token tried rather
-            // than the set of all of them: a store cycling A->B->A wastes one
-            // request on the second attempt, which is a better trade than
-            // threading extra state through a loop whose whole virtue is a
-            // hard ceiling of three API calls.
-            const MAX_AUTH_RECOVERY_ATTEMPTS = 2
-            let tokenInUse = latest.accessToken
+            // Local-credential recovery only. In proxy mode `latest` is null
+            // and there is no local credential to reload or refresh — a 401/429
+            // from the proxy is the proxy's own pooled-account problem, not
+            // ours, and must be surfaced untouched, not chased through this
+            // loop. Declared before the `if (latest)` block because the
+            // long-context beta loop below references it in both modes.
+            let tokenInUse = latest?.accessToken ?? ""
+            if (latest) {
+              // Recover from a rejected token: first by adopting credentials
+              // rotated externally (cswap switching accounts, the claude CLI,
+              // another OpenCode instance), then by forcing an OAuth refresh
+              // when the store still holds the token that was just rejected.
+              //
+              // Most cases resolve on the first attempt: a cold or unreadable
+              // store yields null from the reload (reloadCredentialsFromSource
+              // rejects anything expiring within 60s), so the force refresh runs
+              // immediately. The second attempt covers the narrower race where
+              // the reload returns a valid-looking token that a concurrent
+              // writer has itself just rotated again.
+              //
+              // The cap is the real bound. Against a store being rotated on
+              // every read, every candidate differs from tokenInUse, so the
+              // no-progress break never fires and the cap alone stops the loop.
+              // The break is the fast path out of the common cases, not the
+              // guarantee of termination.
+              //
+              // tokenInUse deliberately tracks only the last token tried rather
+              // than the set of all of them: a store cycling A->B->A wastes one
+              // request on the second attempt, which is a better trade than
+              // threading extra state through a loop whose whole virtue is a
+              // hard ceiling of three API calls.
+              const MAX_AUTH_RECOVERY_ATTEMPTS = 2
 
-            for (
-              let attempt = 0;
-              response.status === 401 && attempt < MAX_AUTH_RECOVERY_ATTEMPTS;
-              attempt++
-            ) {
-              let candidate: ClaudeCredentials | null = null
-              // reloadCredentialsFromSource already catches its own source
-              // read and returns null, so this is unreachable today. It stays
-              // because the guarantee worth keeping is that no reload failure
-              // turns a well-formed 401 into an exception thrown out of
-              // fetch() — degrading to the original response beats crashing
-              // the request. It logs so a future reload that does throw is
-              // diagnosable rather than silently null-coalesced.
-              try {
-                candidate = reloadCredentialsFromSource()
-              } catch (err) {
-                log("auth_recovery_reload_threw", {
-                  modelId,
-                  attempt: attempt + 1,
-                  error: err instanceof Error ? err.message : String(err),
-                })
-              }
-
-              if (!candidate || candidate.accessToken === tokenInUse) {
+              for (
+                let attempt = 0;
+                response.status === 401 && attempt < MAX_AUTH_RECOVERY_ATTEMPTS;
+                attempt++
+              ) {
+                let candidate: ClaudeCredentials | null = null
+                // reloadCredentialsFromSource already catches its own source
+                // read and returns null, so this is unreachable today. It stays
+                // because the guarantee worth keeping is that no reload failure
+                // turns a well-formed 401 into an exception thrown out of
+                // fetch() — degrading to the original response beats crashing
+                // the request. It logs so a future reload that does throw is
+                // diagnosable rather than silently null-coalesced.
                 try {
-                  candidate = await forceRefreshActiveAccount()
+                  candidate = reloadCredentialsFromSource()
                 } catch (err) {
-                  // A rejected refresh and a refresh that returned null are
-                  // different operator-facing diagnoses; auth_recovery_
-                  // exhausted below collapses them, so record this one here.
-                  log("auth_recovery_force_refresh_threw", {
+                  log("auth_recovery_reload_threw", {
                     modelId,
                     attempt: attempt + 1,
                     error: err instanceof Error ? err.message : String(err),
                   })
                 }
-              }
 
-              // Re-checked, not copy-pasted: the guard above decides whether
-              // to force a refresh, this one decides whether that refresh
-              // actually produced a token worth retrying with.
-              if (!candidate || candidate.accessToken === tokenInUse) {
-                log("auth_recovery_exhausted", {
-                  modelId,
-                  attempt: attempt + 1,
+                if (!candidate || candidate.accessToken === tokenInUse) {
+                  try {
+                    candidate = await forceRefreshActiveAccount()
+                  } catch (err) {
+                    // A rejected refresh and a refresh that returned null are
+                    // different operator-facing diagnoses; auth_recovery_
+                    // exhausted below collapses them, so record this one here.
+                    log("auth_recovery_force_refresh_threw", {
+                      modelId,
+                      attempt: attempt + 1,
+                      error: err instanceof Error ? err.message : String(err),
+                    })
+                  }
+                }
+
+                // Re-checked, not copy-pasted: the guard above decides whether
+                // to force a refresh, this one decides whether that refresh
+                // actually produced a token worth retrying with.
+                if (!candidate || candidate.accessToken === tokenInUse) {
+                  log("auth_recovery_exhausted", {
+                    modelId,
+                    attempt: attempt + 1,
+                  })
+                  break
+                }
+
+                tokenInUse = candidate.accessToken
+                log("auth_recovery_retry", { modelId, attempt: attempt + 1 })
+                response = await fetchWithRetry(requestUrl, {
+                  ...requestInit,
+                  body,
+                  headers: buildRequestHeaders(
+                    input,
+                    requestInit,
+                    tokenInUse,
+                    modelId,
+                    excluded,
+                  ),
                 })
-                break
               }
-
-              tokenInUse = candidate.accessToken
-              log("auth_recovery_retry", { modelId, attempt: attempt + 1 })
-              response = await fetchWithRetry(requestUrl, {
-                ...requestInit,
-                body,
-                headers: buildRequestHeaders(
-                  input,
-                  requestInit,
-                  tokenInUse,
-                  modelId,
-                  excluded,
-                ),
-              })
-            }
 
             // An external switch — cswap rotating off an exhausted account —
             // leaves this session on the old token until the 30s credential
@@ -589,6 +603,7 @@ const plugin: Plugin = async () => {
                 })
               }
             }
+            }
 
             // Check for long-context beta errors and retry with betas excluded
             // Try up to LONG_CONTEXT_BETAS.length times, excluding one more beta each time
@@ -621,7 +636,8 @@ const plugin: Plugin = async () => {
 
               // Rebuild headers without the excluded beta and retry
               // Falls back to tokenInUse, not latest: after a 401 recovery the
-              // latter is the token the API already rejected.
+              // latter is the token the API already rejected. In proxy mode
+              // tokenInUse is the empty string, which is correct.
               const currentCreds = await getCachedCredentials()
               const retryToken = currentCreds?.accessToken ?? tokenInUse
               const newExcluded = getExcludedBetas(modelId)
