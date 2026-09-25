@@ -15,8 +15,21 @@ function prefixName(name: string): string {
 
 /**
  * Reverse prefixName: strip TOOL_PREFIX and restore the original leading case.
+ * The optional toolNameMap is a fork-local extension used by the teamclaude
+ * gateway to restore the caller's exact original casing (e.g. mcp_Read -> Read
+ * for native Claude Code, mcp_Bash -> bash for OpenCode); without it the leading
+ * character is lowercased.
  */
-function unprefixName(name: string): string {
+function unprefixName(
+  name: string,
+  toolNameMap?: Record<string, string>,
+): string {
+  if (
+    toolNameMap &&
+    Object.prototype.hasOwnProperty.call(toolNameMap, name)
+  ) {
+    return toolNameMap[name]
+  }
   return `${name.charAt(0).toLowerCase()}${name.slice(1)}`
 }
 
@@ -345,6 +358,8 @@ export function transformBody(
       // eslint-disable-next-line @typescript-eslint/naming-convention
       output_config?: Record<string, unknown>
       tools?: Array<{ name?: string } & Record<string, unknown>>
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      tool_choice?: { name?: string } & Record<string, unknown>
       messages?: Array<{
         role?: string
         content?:
@@ -476,6 +491,15 @@ export function transformBody(
       }))
     }
 
+    // tool_choice can pin a tool by name; prefix it so it still matches the
+    // tools renamed above (an unprefixed reference would be rejected).
+    if (parsed.tool_choice && typeof parsed.tool_choice.name === "string") {
+      parsed.tool_choice = {
+        ...parsed.tool_choice,
+        name: prefixName(parsed.tool_choice.name),
+      }
+    }
+
     if (Array.isArray(parsed.messages)) {
       parsed.messages = parsed.messages.map((message) => {
         if (!Array.isArray(message.content)) {
@@ -505,14 +529,20 @@ export function transformBody(
   }
 }
 
-export function stripToolPrefix(text: string): string {
+export function stripToolPrefix(
+  text: string,
+  toolNameMap?: Record<string, string>,
+): string {
   return text.replace(
     /"name"\s*:\s*"mcp_([^"]+)"/g,
-    (_match, name: string) => `"name": "${unprefixName(name)}"`,
+    (_match, name: string) => `"name": "${unprefixName(name, toolNameMap)}"`,
   )
 }
 
-export function transformResponseStream(response: Response): Response {
+export function transformResponseStream(
+  response: Response,
+  toolNameMap?: Record<string, string>,
+): Response {
   if (!response.body) {
     return response
   }
@@ -533,7 +563,7 @@ export function transformResponseStream(response: Response): Response {
           return
         }
         const text = decoder.decode(value, { stream: true })
-        controller.enqueue(encoder.encode(stripToolPrefix(text)))
+        controller.enqueue(encoder.encode(stripToolPrefix(text, toolNameMap)))
       },
     })
 
@@ -556,7 +586,9 @@ export function transformResponseStream(response: Response): Response {
         if (boundary !== -1) {
           const completeEvent = buffer.slice(0, boundary + 2)
           buffer = buffer.slice(boundary + 2)
-          controller.enqueue(encoder.encode(stripToolPrefix(completeEvent)))
+          controller.enqueue(
+            encoder.encode(stripToolPrefix(completeEvent, toolNameMap)),
+          )
           return
         }
 
@@ -564,7 +596,9 @@ export function transformResponseStream(response: Response): Response {
 
         if (done) {
           if (buffer) {
-            controller.enqueue(encoder.encode(stripToolPrefix(buffer)))
+            controller.enqueue(
+              encoder.encode(stripToolPrefix(buffer, toolNameMap)),
+            )
             buffer = ""
           }
           controller.close()

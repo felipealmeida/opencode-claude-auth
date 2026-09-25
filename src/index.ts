@@ -63,6 +63,41 @@ export {
   extractFirstUserMessageText,
 } from "./signing.ts"
 
+// Fork-local compatibility exports for the teamclaude gateway, which vendors
+// this build and imports both symbols. Upstream renamed SYSTEM_IDENTITY_PREFIX
+// to SYSTEM_IDENTITY and inlined the old prepareClaudeRequest helper into the
+// fetch loader; the gateway still calls prepareClaudeRequest(bodyStr) directly,
+// so re-provide both here.
+export const SYSTEM_IDENTITY_PREFIX = SYSTEM_IDENTITY
+
+export function prepareClaudeRequest(body: string): string {
+  if (typeof body !== "string") {
+    return body
+  }
+  let parsed: { system?: Array<{ type?: string; text?: string }> }
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return body
+  }
+  const alreadyShaped =
+    Array.isArray(parsed.system) &&
+    parsed.system.some(
+      (entry) =>
+        entry.type === "text" &&
+        typeof entry.text === "string" &&
+        entry.text.startsWith("x-anthropic-billing-header"),
+    )
+  if (alreadyShaped) {
+    return body
+  }
+  if (!Array.isArray(parsed.system)) {
+    parsed.system = []
+  }
+  parsed.system.unshift({ type: "text", text: SYSTEM_IDENTITY_PREFIX })
+  return transformBody(JSON.stringify(parsed)) as string
+}
+
 function getCliVersion(): string {
   return process.env.ANTHROPIC_CLI_VERSION ?? config.ccVersion
 }
